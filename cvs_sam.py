@@ -1,0 +1,1 @@
+from sam3.model_builder import build_sam3_video_predictor
