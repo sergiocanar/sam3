@@ -1,3 +1,4 @@
+import os
 import json 
 
 def load_json(path: str) -> dict:   
@@ -21,3 +22,15 @@ def load_txt(path: str) -> str:
             data.append(line.strip())
         
     return data
+
+def create_dir_if_not_exists(dir_path: str):
+    '''Create a directory if it does not exist.'''
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+        
+def xywh_to_xyxy(bbox):
+    """
+    Converts the format from [x,y,w,h] into [x_min, y_min, x_max, y_max].
+    """
+    x, y, w, h = bbox
+    return [x, y, x + w, y + h]
