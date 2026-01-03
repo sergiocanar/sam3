@@ -25,7 +25,8 @@ from utils import (
     save_json,
     load_txt,
     create_dir_if_not_exists,
-    xywh_to_xyxy
+    xywh_to_xyxy,
+    return_linear_transform
 )
 
 
@@ -63,6 +64,59 @@ def cvs_argparse():
         help="Directory to save output results (default: SAM_Seg50)"
     )
     return parser
+
+def sam_predictions_to_coco(masks, image_id, category_ids=None, start_ann_id=1):
+    """
+    Convierte predicciones de SAM en anotaciones estilo COCO.
+
+    Args:
+        masks (list[Tensor o np.ndarray]): Lista de máscaras binarias o logits (>0 se considera foreground).
+        image_id (int): ID de la imagen.
+        category_ids (list[int]): Lista con el category_id de cada máscara.
+        start_ann_id (int): ID inicial para las anotaciones.
+
+    Returns:
+        list[dict]: lista de anotaciones estilo COCO.
+        ann_id[int]: Last annotation id that was used.
+    """
+    annotations = []
+    ann_id = start_ann_id
+
+    for idx, mask_pred in enumerate(masks):
+        # Tensor -> numpy binario
+        if isinstance(mask_pred, torch.Tensor):
+            mask = (mask_pred > 0).cpu().numpy().astype(np.uint8)
+        else:
+            mask = (mask_pred > 0).astype(np.uint8)
+
+        # Asegurar 2D
+        if mask.ndim == 3:
+            mask = mask[0]
+
+        # RLE encoding
+        rle = mask_utils.encode(np.asfortranarray(mask))
+        rle["counts"] = rle["counts"].decode("utf-8")  # JSON friendly
+
+        # Área y bbox
+        area = int(mask_utils.area(rle))
+        bbox = mask_utils.toBbox(rle).tolist()  # [x, y, w, h]
+
+        # Category ID
+        category_id = category_ids[idx] if category_ids is not None else 1
+
+        annotations.append({
+            "id": ann_id,
+            "image_id": image_id,
+            "segmentation": rle,
+            "iscrowd": 0,
+            "bbox": bbox,
+            "area": area,
+            "category_id": category_id
+        })
+
+        ann_id += 1
+
+    return annotations, ann_id
 
 def obtain_bboxes(info: dict):
     bboxes = []
@@ -147,7 +201,7 @@ def process_json_data(coco_data: dict):
 
     return complete_info
 
-def main(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, is_segmentation: bool, window: int = 1, propagation_type: str = "both", output_dir: str = None)->None:
+def get_video_segments(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, is_segmentation: bool, window: int = 1, propagation_type: str = "both")->tuple:
         
     #Total frames lists
     frames_lt = sorted(glob(path_join(video_path, "*.jpg")))
@@ -190,7 +244,6 @@ def main(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, i
                 continue
     
     kf_idx_lt = sorted(list(kf_idx_lt))
-    logging.info(f"Keyframes for {video_path}: {kf_idx_lt}")
     
     #Store video segments in dict
     video_segments = {}
@@ -214,29 +267,116 @@ def main(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, i
     elif propagation_type == "past":
         logging.info(f'Propagating into the past {window} frames (s).')
         
-        logging.info(f'Working on keyframe: {ann_frame_idx}')
-        for out_frame_idx, out_obj_ids, low_res_masks, out_mask_logits, obj_scores in predictor.propagate_in_video(inference_state=inference_state, start_frame_idx=ann_frame_idx, max_frame_num_to_track=window, reverse=True):
-            video_segments[out_frame_idx] = {out_obj_id: out_mask_logits[i] for i, out_obj_id in enumerate(out_obj_ids)}
+        with tqdm(total=len(kf_idx_lt), desc='Processing keyframes...') as pbar:            
+            for ann_frame_idx in kf_idx_lt: 
+                for out_frame_idx, out_obj_ids, low_res_masks, out_mask_logits, obj_scores in predictor.propagate_in_video(inference_state=inference_state, start_frame_idx=ann_frame_idx, max_frame_num_to_track=window, reverse=True):
+                    logging.info(f'Working on keyframe: {ann_frame_idx}')
+                    video_segments[out_frame_idx] = {out_obj_id: out_mask_logits[i] for i, out_obj_id in enumerate(out_obj_ids)}
+                    pbar.update(1)
         
     elif propagation_type == "future":
         logging.info(f'Propagating into the future {window} frames (s).')
         
-        logging.info(f'Working on keyframe: {ann_frame_idx}')
-        for ann_frame_idx in kf_idx_lt:        
-            for out_frame_idx, out_obj_ids, low_res_masks, out_mask_logits, obj_scores in predictor.propagate_in_video(inference_state=inference_state, start_frame_idx=ann_frame_idx, max_frame_num_to_track=window, reverse=False):
-                video_segments[out_frame_idx] = {out_obj_id: out_mask_logits[i] for i, out_obj_id in enumerate(out_obj_ids)}
+        with tqdm(total=len(kf_idx_lt), desc='Processing keyframes...') as pbar:            
+            for ann_frame_idx in kf_idx_lt: 
+                for out_frame_idx, out_obj_ids, low_res_masks, out_mask_logits, obj_scores in predictor.propagate_in_video(inference_state=inference_state, start_frame_idx=ann_frame_idx, max_frame_num_to_track=window, reverse=False):
+                    logging.info(f'Working on keyframe: {ann_frame_idx}')
+                    video_segments[out_frame_idx] = {out_obj_id: out_mask_logits[i] for i, out_obj_id in enumerate(out_obj_ids)}
+                    pbar.update(1)
     else:
         raise ValueError(f'Propagation type must be: both, past or future. You have: {propagation_type}')
     
+    return inference_state, video_segments, kf_idx_lt, video_kf_lt    
+
+def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict, kf_lt: list, img_id_counter: int, ann_id_counter: int) -> dict:
+    
+    #Extract lists from COCO json
+    images_info_lt = coco_json_dict["images"]
+    annos_info_lt = coco_json_dict["annotations"]
+    cats_lt = coco_json_dict["categories"]
+    video_name = base_path.split("/")[-1]
+
+    #Frame lists from video in analysis
+    frame_paths_lt = sorted(glob(path_join(base_path, "*.jpg")))
     
     
-    
-    breakpoint()
-    
+    #Itterate over frame_idx in video_segments...
+    for frame_idx, obj_dict in video_segments.items():
+        if frame_idx in kf_lt:
+            #Skip those frame that are kf. I have their information.
+            continue
+        else:
+            #extract frame path given the index
+            frame_path = frame_paths_lt[frame_idx]
+            path_json = "/".join(frame_path.split('/')[-2:])
+            
+            # Extract shape from img 
+            img = cv2.imread(frame_path) #h, w
+            h, w, _ = img.shape
+
+            #We dont need the img anymore
+            del img
+            
+            image_info = {
+                "file_name": path_json, 
+                "height": h,
+                "width": w,
+                "id": img_id_counter,
+                "video_name": video_name,
+                "frame_id": '',
+                "is_det_keyframe": True,
+                "ds": [],
+                "video_id": int(video_name.split("_")[-1]),
+                "is_ds_keyframe": False
+            }
+            
+            images_info_lt.append(image_info)
+            
+            #Lists for masks and cats
+            masks = []
+            category_ids = []
+            for obj_id, logit in obj_dict.items():
+                # We need the mask as binary
+                if isinstance(logit, torch.Tensor):
+                    mask = (logit > 0).cpu().numpy().astype(np.uint8)
+                else:
+                    mask = (logit > 0).astype(np.uint8)
+
+                if mask.ndim == 3:
+                    mask = mask[0]
+
+                if mask is not None and mask.any():
+                    masks.append(mask)
+                    category_ids.append(return_linear_transform(obj_id))
+                    
+            if len(masks) == 0:
+                img_id_counter += 1
+                continue
+            else:
+                            
+                #Annots converted to COCO
+                new_annos_lt, latest_ann_id = sam_predictions_to_coco(
+                    masks=masks,
+                    image_id=img_id_counter,
+                    category_ids=category_ids,
+                    start_ann_id=ann_id_counter
+                )
+                
+                annos_info_lt.extend(new_annos_lt)
         
-
-    
-
+        img_id_counter += 1
+        
+    final_dict = {
+        "images": images_info_lt,
+        "annotations": annos_info_lt,
+        "categories": cats_lt
+    }
+    # breakpoint()
+        
+    return final_dict, img_id_counter, latest_ann_id
+            
+            
+            
 
 if __name__ == "__main__":
     
@@ -305,19 +445,37 @@ if __name__ == "__main__":
     output_dir = path_join(annotations_dir, args.output_dir)
     create_dir_if_not_exists(output_dir)
     
-    ann_id = 1
-    img_id_count = 1
+    ann_id = max(img["id"] for img in gt_coco_dict["images"]) + 1
+    img_id_count = max(ann["id"] for ann in gt_coco_dict["annotations"]) + 1
+    final_dict = {}
     
     with tqdm(total=len(train_vids_lt), desc="Processing videos...", unit="video") as pbar:
         for video_id in train_vids_lt:
             pbar.write(f"Now processing: {video_id}")  
             video_path = path_join(frames_dir, video_id)
-            main(
+            inference_state, video_segments, kf_lt, filtered_mask_info_lt = get_video_segments(
                 video_path=video_path,
                 mask_info_lt=masks_info_lt,
                 predictor=predictor,
                 is_segmentation=args.is_segmentation,
-                output_dir=output_dir
             )
+                          
+            new_final_dict, new_img_id_counter, new_latest_ann_id = update_coco_json(
+                        base_path=video_path,
+                        coco_json_dict=gt_coco_dict,
+                        video_segments=video_segments,
+                        kf_lt=kf_lt,
+                        img_id_counter=img_id_count,
+                        ann_id_counter=ann_id
+                    )
+            
+            
+            final_dict = new_final_dict
+            img_id_count = new_img_id_counter
+            ann_id = new_latest_ann_id
+        
             pbar.update(1)
+    
+    final_coco_json = path_join(output_dir, "train_annotation_coco.json")
+    save_json(path=final_coco_json, data=final_dict)
     logging.info(f"Processing completed. Masks are saved in {output_dir}")

@@ -34,3 +34,12 @@ def xywh_to_xyxy(bbox):
     """
     x, y, w, h = bbox
     return [x, y, x + w, y + h]
+
+def return_linear_transform(num: int, M: int = 10):
+    """
+    Linear transformation for SAM objects
+    """
+
+    temp = num - 1
+    category_id = temp // M + 1
+    return category_id
