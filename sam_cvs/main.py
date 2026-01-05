@@ -417,6 +417,7 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
     logging.info(f"Using device: {device}")
+    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
 
     #SAM initialization
     
@@ -473,6 +474,8 @@ if __name__ == "__main__":
             final_dict = new_final_dict
             img_id_count = new_img_id_counter
             ann_id = new_latest_ann_id
+            
+            del inference_state, video_segments
         
             pbar.update(1)
     
