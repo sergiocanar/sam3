@@ -4,24 +4,13 @@ import matplotlib.pyplot as plt
 from pycocotools import mask as mask_utils 
 
 from tqdm import tqdm
-from collections import defaultdict
 from os.path import join as path_join 
 from utils import (
     load_json,
-    create_dir_if_not_exists
+    create_dir_if_not_exists,
+    build_file_to_imgid,
+    build_imgid_to_anns
 )
-
-def build_file_to_imgid(coco: dict):
-    # file_name -> image_id
-    return {im["file_name"]: im["id"] for im in coco.get("images", [])}
-
-def build_imgid_to_anns(coco: dict):
-    # image_id -> list[ann]
-    imgid2anns = defaultdict(list)
-    for ann in coco.get("annotations", []):
-        imgid2anns[ann["image_id"]].append(ann)
-    return imgid2anns
-
 
 def plot_sequence(seq_dict_lt: list, colormap: list, output_dir: str) -> None:
     """
@@ -117,6 +106,195 @@ def plot_sequence(seq_dict_lt: list, colormap: list, output_dir: str) -> None:
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+def plot_sequence_multimodel(
+    seq_dicts_by_model: list,
+    model_names: list,
+    colormap: list,
+    output_dir: str,
+) -> None:
+    """
+    Plot an MxN grid:
+      - rows: models (SAM2, SAM3, ...)
+      - cols: time window frames (t-1, t, t+1, ...)
+
+    seq_dicts_by_model: list of length M
+        each element is a list of dicts (length N), like:
+        {
+            "sec": int,
+            "img_id": int or None,
+            "file_name": "/abs/path/to/frame.jpg",
+            "annos": [coco_ann, ...] or [],
+            "missing": bool
+        }
+    model_names: list of strings length M
+    """
+    create_dir_if_not_exists(output_dir)
+
+    catid2rgb = {c["id"]: (np.array(c["color"], dtype=np.float32) / 255.0) for c in colormap}
+
+    if len(seq_dicts_by_model) == 0:
+        return
+
+    n_models = len(seq_dicts_by_model)
+    n = len(seq_dicts_by_model[0])
+    if n == 0:
+        return
+
+    mid = n // 2
+
+    fig, axs = plt.subplots(n_models, n, figsize=(5 * n, 5 * n_models))
+    if n_models == 1:
+        axs = np.expand_dims(axs, axis=0)
+    if n == 1:
+        axs = np.expand_dims(axs, axis=1)
+
+    for r in range(n_models):
+        model_seq = seq_dicts_by_model[r]
+        model_name = model_names[r] if r < len(model_names) else f"model_{r}"
+
+        for i in range(n):
+            info = model_seq[i]
+            ax = axs[r, i]
+
+            img_path = info.get("file_name", None)
+            missing = bool(info.get("missing", False))
+
+            # ---- Load image ----
+            if img_path is None or (not os.path.exists(img_path)):
+                ax.set_axis_off()
+                ax.set_title(f"{model_name}\nmissing image")
+                continue
+
+            img = plt.imread(img_path)
+            ax.imshow(img)
+
+            # ---- Overlay masks ----
+            annos = info.get("annos", []) or []
+            for ann in annos:
+                seg = ann.get("segmentation", None)
+                if seg is None:
+                    continue
+                try:
+                    m = mask_utils.decode(seg)
+                except Exception:
+                    continue
+                if m is None:
+                    continue
+                if m.ndim == 3:
+                    m = m[..., 0]
+                m = (m > 0).astype(np.float32)
+                if m.sum() == 0:
+                    continue
+
+                cat_id = ann.get("category_id", None)
+                rgb = catid2rgb.get(cat_id, np.array([1.0, 1.0, 1.0], dtype=np.float32))
+
+                overlay = np.zeros((m.shape[0], m.shape[1], 3), dtype=np.float32)
+                overlay[..., 0] = rgb[0]
+                overlay[..., 1] = rgb[1]
+                overlay[..., 2] = rgb[2]
+
+                ax.imshow(overlay, alpha=0.45 * m)
+
+            # ---- Titles ----
+            rel = i - mid
+            time_tag = "t (KF)" if rel == 0 else f"t{rel:+d}"
+            img_id = info.get("img_id", None)
+
+            if missing:
+                title = f"{model_name}\n{time_tag} | missing masks"
+            else:
+                title = f"{model_name}\n{time_tag} | id={img_id if img_id is not None else 'NA'}"
+
+            ax.set_title(title, fontsize=11)
+            ax.set_axis_off()
+
+    plt.tight_layout()
+
+    # Use center frame name for saving
+    center_path = seq_dicts_by_model[0][mid].get("file_name", "sequence")
+    base = os.path.splitext(os.path.basename(center_path))[0]
+    parent = os.path.basename(os.path.dirname(center_path))
+    out_name = f"{parent}_{base}_win{mid}_multimodel.png"
+    out_path = path_join(output_dir, out_name)
+
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+def plot_pseudo_labels_multimodel(
+    frames_dir: str,
+    og_coco_dict: dict,
+    pseudo_coco_dicts: list,   # [sam2_dict, sam3_dict, ...]
+    model_names: list,         # ["SAM2", "SAM3", ...]
+    colormap: list,
+    output_dir: str,
+    window: int = 1,
+) -> None:
+
+    # keyframes list from GT json
+    kf_imgs_lt = og_coco_dict["images"]
+    kf_file_name_lt = sorted([img_info["file_name"] for img_info in kf_imgs_lt])
+
+    # Pre-build lookup tables per model (file -> img_id, img_id -> annos)
+    file2imgid_per_model = []
+    imgid2annos_per_model = []
+    for coco in pseudo_coco_dicts:
+        file2imgid_per_model.append(build_file_to_imgid(coco=coco))
+        imgid2annos_per_model.append(build_imgid_to_anns(coco=coco))
+
+    with tqdm(total=len(kf_file_name_lt), desc="Plotting pseudo labels (multi-model)...", unit="Keyframe") as pbar:
+        for kf_file in kf_file_name_lt:
+            vid, frame_jpg = kf_file.split("/")
+            kf_frame_num = int(frame_jpg.split(".")[0])
+
+            min_past_frame = kf_frame_num - window
+            max_future_frame = kf_frame_num + window
+
+            seq2plot = np.arange(start=min_past_frame, stop=max_future_frame + 1, step=1)
+            file2plot = [f"{vid}/{int(frame_idx):06d}.jpg" for frame_idx in seq2plot]
+
+            # Build per-model sequences aligned by *file path* (not img_id)
+            seq_dicts_by_model = []
+            for m_idx in range(len(pseudo_coco_dicts)):
+                file2imgid = file2imgid_per_model[m_idx]
+                imgid2annos = imgid2annos_per_model[m_idx]
+
+                model_seq = []
+                for i, rel_file in enumerate(file2plot):
+                    sec = int(seq2plot[i])
+                    abs_path = path_join(frames_dir, rel_file)
+
+                    if rel_file not in file2imgid:
+                        # missing masks for this model on this frame
+                        model_seq.append({
+                            "sec": sec,
+                            "img_id": None,
+                            "file_name": abs_path,
+                            "annos": [],
+                            "missing": True
+                        })
+                        continue
+
+                    img_id = file2imgid[rel_file]
+                    annos = imgid2annos.get(img_id, [])
+
+                    model_seq.append({
+                        "sec": sec,
+                        "img_id": img_id,
+                        "file_name": abs_path,
+                        "annos": annos,
+                        "missing": False
+                    })
+
+                seq_dicts_by_model.append(model_seq)
+
+            plot_sequence_multimodel(
+                seq_dicts_by_model=seq_dicts_by_model,
+                model_names=model_names,
+                colormap=colormap,
+                output_dir=output_dir
+            )
+            pbar.update(1)
 
 
 def plot_pseudo_labels(frames_dir: str, og_coco_dict:dict, pseudo_coco_dict:dict, colormap:list, output_dir: str, window: int=1)->None:
@@ -196,10 +374,14 @@ if __name__ == "__main__":
     seg50_json_path = path_join(seg_50_dir, "train_annotation_coco.json")    
     seg50_dict = load_json(path=seg50_json_path)
     
-    #Pseudo labels + Original path
-    sam_seg50_dir = path_join(annots_dir, "SAM_Seg50")
-    sam_seg50_json_path = path_join(sam_seg50_dir, "train_annotation_coco.json")    
-    sam_seg50_dict = load_json(path=sam_seg50_json_path)
+    sam2_seg50_dir = path_join(annots_dir, "SAM2_Seg50")
+    sam2_seg50_json_path =path_join(sam2_seg50_dir, "train_annotation_coco.json")
+    sam2_seg50_dict = load_json(path=sam2_seg50_json_path)
+        
+    #Pseudo labels + Original path from SAM3
+    sam3_seg50_dir = path_join(annots_dir, "SAM3_Seg50")
+    sam3_seg50_json_path = path_join(sam3_seg50_dir, "train_annotation_coco.json")    
+    sam3_seg50_dict = load_json(path=sam3_seg50_json_path)
         
     #Create output dir 
     output_dir = path_join(this_dir, "visualizations")
@@ -269,14 +451,23 @@ if __name__ == "__main__":
         }
     ]
 
-    
-    plot_pseudo_labels(
-        frames_dir=frames_dir, 
-        og_coco_dict=seg50_dict,
-        pseudo_coco_dict=sam_seg50_dict,
-        colormap=colormap, 
-        output_dir=output_dir,
-        window=1
+    plot_pseudo_labels_multimodel(
+    frames_dir=frames_dir,
+    og_coco_dict=seg50_dict,
+    pseudo_coco_dicts=[sam2_seg50_dict, sam3_seg50_dict],
+    model_names=["SAM2", "SAM3"],
+    colormap=colormap,
+    output_dir=output_dir,
+    window=1
     )
+    
+    # plot_pseudo_labels(
+    #     frames_dir=frames_dir, 
+    #     og_coco_dict=seg50_dict,
+    #     pseudo_coco_dict=sam3_seg50_dict,
+    #     colormap=colormap, 
+    #     output_dir=output_dir,
+    #     window=1
+    # )
     
     

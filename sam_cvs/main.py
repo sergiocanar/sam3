@@ -446,8 +446,9 @@ if __name__ == "__main__":
     output_dir = path_join(annotations_dir, args.output_dir)
     create_dir_if_not_exists(output_dir)
     
-    ann_id = max(img["id"] for img in gt_coco_dict["images"]) + 1
-    img_id_count = max(ann["id"] for ann in gt_coco_dict["annotations"]) + 1
+    img_id_count = max(img["id"] for img in gt_coco_dict["images"]) + 1
+    ann_id = max(ann["id"] for ann in gt_coco_dict["annotations"]) + 1
+
     final_dict = {}
     
     with tqdm(total=len(train_vids_lt), desc="Processing videos...", unit="video") as pbar:

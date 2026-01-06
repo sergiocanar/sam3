@@ -1,5 +1,7 @@
 import os
 import json 
+from collections import defaultdict
+
 
 def load_json(path: str) -> dict:   
     '''Load a JSON file and return its contents as a dictionary.'''
@@ -43,3 +45,14 @@ def return_linear_transform(num: int, M: int = 10):
     temp = num - 1
     category_id = temp // M + 1
     return category_id
+
+def build_file_to_imgid(coco: dict):
+    # file_name -> image_id
+    return {im["file_name"]: im["id"] for im in coco.get("images", [])}
+
+def build_imgid_to_anns(coco: dict):
+    # image_id -> list[ann]
+    imgid2anns = defaultdict(list)
+    for ann in coco.get("annotations", []):
+        imgid2anns[ann["image_id"]].append(ann)
+    return imgid2anns
