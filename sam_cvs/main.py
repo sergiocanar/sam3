@@ -286,6 +286,7 @@ def get_video_segments(video_path: str, mask_info_lt: list, predictor: Sam3Track
     else:
         raise ValueError(f'Propagation type must be: both, past or future. You have: {propagation_type}')
     
+    
     return inference_state, video_segments, kf_idx_lt, video_kf_lt    
 
 def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict, kf_lt: list, img_id_counter: int, ann_id_counter: int) -> dict:
@@ -313,7 +314,6 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
             # Extract shape from img 
             img = cv2.imread(frame_path) #h, w
             h, w, _ = img.shape
-
             #We dont need the img anymore
             del img
             
@@ -353,7 +353,7 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
                 img_id_counter += 1
                 continue
             else:
-                            
+                       
                 #Annots converted to COCO
                 new_annos_lt, latest_ann_id = sam_predictions_to_coco(
                     masks=masks,
