@@ -1,23 +1,18 @@
 import os 
-from glob import glob
 import cv2
 import sam3
 import torch
 import logging
 import argparse
 import numpy as np
-from PIL import Image
+import matplotlib.pyplot as plt 
 
+from glob import glob
 from tqdm import tqdm
-from sam3.model_builder import build_sam3_video_model
-from sam3.visualization_utils import (
-    load_frame,
-    prepare_masks_for_visualization,
-    visualize_formatted_frame_output,
-)
-
 from pycocotools import mask as mask_utils
 from sam3.model.sam3_tracking_predictor import Sam3TrackerPredictor
+from sam3.model.sam3_video_predictor import Sam3VideoPredictorMultiGPU
+from sam3.model_builder import build_sam3_video_model, build_sam3_video_predictor
 
 from os.path import join as path_join
 from utils import (
@@ -26,9 +21,11 @@ from utils import (
     load_txt,
     create_dir_if_not_exists,
     xywh_to_xyxy,
-    return_linear_transform
+    return_linear_transform,
+    propagate_in_video,
+    abs_to_rel_coords,
+    renumber_annotation_ids
 )
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +57,7 @@ def cvs_argparse():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="SAM_Seg50",
+        default="SAM3_Seg50",
         help="Directory to save output results (default: SAM_Seg50)"
     )
     return parser
@@ -167,10 +164,10 @@ def rle_list_to_masks(rle_list: list, M: int = 10)->list:
 
     return masks, object_ids, categories 
 
-def process_json_data(coco_data: dict):
+def process_json_data(coco_data: dict)->list:
     
     '''
-    Process COCO JSON data to extract image and mask information.
+    Process COCO JSON data to extract image and object information.
     Arguments:
         coco_data (dict): COCO formatted JSON data containing images and annotations.
     Returns:
@@ -201,7 +198,7 @@ def process_json_data(coco_data: dict):
 
     return complete_info
 
-def get_video_segments(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, is_segmentation: bool, window: int = 1, propagation_type: str = "both")->tuple:
+def get_video_segments_for_segmentation(video_path: str, mask_info_lt: list, predictor: Sam3TrackerPredictor, window: int = 1, propagation_type: str = "both")->tuple:
         
     #Total frames lists
     frames_lt = sorted(glob(path_join(video_path, "*.jpg")))
@@ -299,8 +296,7 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
 
     #Frame lists from video in analysis
     frame_paths_lt = sorted(glob(path_join(base_path, "*.jpg")))
-    
-    
+
     #Itterate over frame_idx in video_segments...
     for frame_idx, obj_dict in video_segments.items():
         if frame_idx in kf_lt:
@@ -352,8 +348,7 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
             if len(masks) == 0:
                 img_id_counter += 1
                 continue
-            else:
-                       
+            else:                       
                 #Annots converted to COCO
                 new_annos_lt, latest_ann_id = sam_predictions_to_coco(
                     masks=masks,
@@ -363,6 +358,7 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
                 )
                 
                 annos_info_lt.extend(new_annos_lt)
+                ann_id_counter = latest_ann_id
         
         img_id_counter += 1
         
@@ -371,11 +367,106 @@ def update_coco_json(base_path: str, coco_json_dict: dict, video_segments: dict,
         "annotations": annos_info_lt,
         "categories": cats_lt
     }
-    # breakpoint()
+    
         
-    return final_dict, img_id_counter, latest_ann_id
+    return final_dict, img_id_counter, ann_id_counter
+
+
+def get_kf_lt(frames_lt:list, object_info_lt: list)->list:
+    
+    """
+    Get a list of elements with object information in every frame.
+    
+    """
+    
+    video_kf_lt = []
+    #Filter information for getting ready keyframes
+    for frame_path in frames_lt:
+        frame_vid_id = "/".join(frame_path.split('/')[-2:])
+
+        info = next(
+            (m for m in object_info_lt if m["file_name"] == frame_vid_id), None
+            )
+        
+        video_kf_lt.append(info)
+    
+    return video_kf_lt
+            
+def bbox2segm(video_path: str, coco_dict:dict, predictor: Sam3VideoPredictorMultiGPU, object_info_lt: list, text_dict: dict, session_id: str, start_ann_id: int) -> dict:
+    
+    #Total frames lists
+    frames_lt = sorted(glob(path_join(video_path, "*.jpg")))
+    kf_lt = get_kf_lt(frames_lt=frames_lt,
+                      object_info_lt=object_info_lt
+                    )
+
+    updated_dict = {
+        "images": coco_dict["images"],
+        "annotations": [],
+        "categories": coco_dict["categories"]
+    }
+    
+    for frame_idx, obj_info_dict in enumerate(kf_lt):
+        
+        if obj_info_dict is None:
+            continue
+        else:
+            
+            img_id = obj_info_dict["image_id"]
+            objs_info_lt = obj_info_dict["segmentations_list"]
+            
+            frame_path = frames_lt[frame_idx]
+            img = cv2.imread(filename=frame_path)
+            
+            h, w, _ = img.shape
+
+            M = 10
+            count_instances = {1: 1, 2: 1, 3:1, 4: 1, 5:1, 6:1}
+            for obj in objs_info_lt:
+
+                cat_id = str(obj["category_id"])
+                bbox = obj["bbox"]
+                coords_prompt = abs_to_rel_coords([bbox], w, h, "box")
+                text_prompt = text_dict[cat_id]
+                object_id_instance = (obj['category_id'] - 1) * M + count_instances[obj['category_id']]
+                count_instances[obj['category_id']] += 1
+                
+                #Add prompt 
+                response = predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=frame_idx,
+                        text=text_prompt,
+                        bounding_boxes=coords_prompt,
+                        bounding_box_labels = [1] * len(coords_prompt),
+                        obj_id=object_id_instance,                        
+                    )
+                )
+                
+                outputs = response["outputs"]
+                masks = outputs["out_binary_masks"]
+                n_obj, h, w = masks.shape
+                cat_ids_lt = [int(cat_id)] * n_obj
+                
+                new_annos_lt, latest_ann_id = sam_predictions_to_coco(
+                    masks=masks,
+                    image_id=img_id,
+                    category_ids=cat_ids_lt,
+                    start_ann_id=start_ann_id
+                )
+                
+                updated_dict["annotations"].extend(new_annos_lt)
+                start_ann_id = latest_ann_id
+
+    return updated_dict, latest_ann_id    
+
+            
+                
             
             
+        
+        
             
 
 if __name__ == "__main__":
@@ -388,7 +479,12 @@ if __name__ == "__main__":
     this_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(this_dir)
     data_dir = path_join(parent_dir, "data")
+    sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
     
+    #GPUs available
+    gpus2use = range(torch.cuda.device_count())
+    
+    #Frame selection
     if args.frames_type == "original":
         logging.info("Using original Endoscapes2023 frames")
         endoscapes_dir = path_join(data_dir, "Endoscapes2023")
@@ -402,14 +498,7 @@ if __name__ == "__main__":
     #Annotations dir 
     annotations_dir = path_join(endoscapes_dir, "annotations")
     
-    #COCO Jsons dir 
-    if args.is_segmentation:
-        logging.info("Segmentation data selected. Propagating segmentation masks.")
-        jsons_dir = path_join(annotations_dir, "Seg50")
-    else:
-        logging.info("Detection data selected. Generating segmentation masks from bboxes.")
-        jsons_dir = path_join(annotations_dir, "Bbox201")
-
+    #CUDA device
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -417,20 +506,33 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
     logging.info(f"Using device: {device}")
-    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-
-    #SAM initialization
     
-    sam3_model = build_sam3_video_model()
-    predictor = sam3_model.tracker
-    predictor.backbone = sam3_model.detector.backbone
     
-    #Video list
+    #COCO Jsons dir 
     if args.is_segmentation:
+        logging.info("Segmentation data selected. Propagating segmentation masks.")
+        jsons_dir = path_join(annotations_dir, "Seg50")
+        
+        #Necessary setup for segmentation
+        torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+
+        #SAM initialization for segmentation mask extension
+        sam3_model = build_sam3_video_model()
+        predictor = sam3_model.tracker
+        predictor.backbone = sam3_model.detector.backbone
+    
+        #Video list 
         train_vids_file = path_join(data_dir, "train_seg_vids.txt")
     else:
+        logging.info("Detection data selected. Generating segmentation masks from bboxes.")
+        jsons_dir = path_join(annotations_dir, "Bbox201")
+        
+        #SAM model initialization        
+        predictor = build_sam3_video_predictor(gpus_to_use=gpus2use)
+        
+        #Video list
         train_vids_file = path_join(data_dir, "train_vids.txt")
-    
+
     #Load train vids list    
     train_vids_lt = load_txt(train_vids_file)
     train_vids_lt = sorted([f"video_{int(float(vid_id)):03d}" for vid_id in train_vids_lt])
@@ -439,8 +541,8 @@ if __name__ == "__main__":
     gt_coco_path = path_join(jsons_dir, "train_annotation_coco.json")
     gt_coco_dict = load_json(gt_coco_path)
     
-    #Get relevant information for mask extension 
-    masks_info_lt = process_json_data(coco_data=gt_coco_dict)
+    #Get relevant information for mask extension or prediction
+    object_info_lt = process_json_data(coco_data=gt_coco_dict)
     
     #Output dir 
     output_dir = path_join(annotations_dir, args.output_dir)
@@ -449,37 +551,84 @@ if __name__ == "__main__":
     img_id_count = max(img["id"] for img in gt_coco_dict["images"]) + 1
     ann_id = max(ann["id"] for ann in gt_coco_dict["annotations"]) + 1
 
-    final_dict = {}
+    cat2text_path = path_join(data_dir, "cat2text.json")
+    cat2text_dict = load_json(cat2text_path)
+
+    if args.is_segmentation:
+        final_dict = {}
+    else:
+        final_dict = {"images": gt_coco_dict["images"], "annotations": [], "categories": gt_coco_dict["categories"]}
+
     
     with tqdm(total=len(train_vids_lt), desc="Processing videos...", unit="video") as pbar:
         for video_id in train_vids_lt:
             pbar.write(f"Now processing: {video_id}")  
             video_path = path_join(frames_dir, video_id)
-            inference_state, video_segments, kf_lt, filtered_mask_info_lt = get_video_segments(
-                video_path=video_path,
-                mask_info_lt=masks_info_lt,
-                predictor=predictor,
-                is_segmentation=args.is_segmentation,
-            )
-                          
-            new_final_dict, new_img_id_counter, new_latest_ann_id = update_coco_json(
-                        base_path=video_path,
-                        coco_json_dict=gt_coco_dict,
-                        video_segments=video_segments,
-                        kf_lt=kf_lt,
-                        img_id_counter=img_id_count,
-                        ann_id_counter=ann_id
+            if args.is_segmentation:                    
+                inference_state, video_segments, kf_lt, filtered_mask_info_lt = get_video_segments_for_segmentation(
+                    video_path=video_path,
+                    mask_info_lt=object_info_lt,
+                    predictor=predictor,
+                )
+                            
+                new_final_dict, new_img_id_counter, new_latest_ann_id = update_coco_json(
+                            base_path=video_path,
+                            coco_json_dict=gt_coco_dict,
+                            video_segments=video_segments,
+                            kf_lt=kf_lt,
+                            img_id_counter=img_id_count,
+                            ann_id_counter=ann_id
+                        ) 
+                final_dict = new_final_dict
+                img_id_count = new_img_id_counter
+                ann_id = new_latest_ann_id
+                
+                del inference_state, video_segments
+            else:
+                       
+                
+                response = predictor.handle_request(
+                    request=dict(
+                        type="start_session",
+                        resource_path=video_path
                     )
-            
-            
-            final_dict = new_final_dict
-            img_id_count = new_img_id_counter
-            ann_id = new_latest_ann_id
-            
-            del inference_state, video_segments
-        
-            pbar.update(1)
+                )
+                
+                session_id = response["session_id"]
+                
+                
+                _ = predictor.handle_request(
+                    request=dict(
+                        type="reset_session",
+                        session_id=session_id,
+                    )
+                )
+                
+                updated_dict, latest_ann_id = bbox2segm(
+                    video_path=video_path,
+                    coco_dict=gt_coco_dict,
+                    predictor=predictor,
+                    object_info_lt=object_info_lt,
+                    text_dict=cat2text_dict,
+                    session_id=session_id,
+                    start_ann_id=ann_id
+                )
+                
+                final_dict["annotations"].extend(updated_dict["annotations"])
+                ann_id = latest_ann_id
+                
+                _ = predictor.handle_request(
+                    request=dict(
+                        type="close_session",
+                        session_id=session_id,
+                    )
+                )
+                
+        pbar.update(1)
     
+    #Renumber annnotations ids to avoid duplicates
+    final_dict = renumber_annotation_ids(final_dict)
+    #save json 
     final_coco_json = path_join(output_dir, "train_annotation_coco.json")
     save_json(path=final_coco_json, data=final_dict)
     logging.info(f"Processing completed. Masks are saved in {output_dir}")

@@ -358,6 +358,74 @@ def plot_pseudo_labels(frames_dir: str, og_coco_dict:dict, pseudo_coco_dict:dict
                 
             pbar.update(1)            
             
+            
+def plot_image_with_segmentation(
+    image_path: str,
+    annos: list,
+    colormap: list,
+    output_path: str = None,
+    alpha: float = 0.45,
+) -> None:
+    """
+    Plot a single image with instance segmentation overlays.
+
+    image_path: absolute path to image
+    annos: list of COCO annotations (RLE in ann["segmentation"])
+    colormap: list of dicts with keys: id, color [R,G,B]
+    output_path: if provided, saves the image
+    alpha: transparency for mask overlay
+    """
+
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    # category_id -> RGB in [0,1]
+    catid2rgb = {
+        c["id"]: np.array(c["color"], dtype=np.float32) / 255.0
+        for c in colormap
+    }
+
+    img = plt.imread(image_path)
+
+    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    ax.imshow(img)
+
+    for ann in annos:
+        seg = ann.get("segmentation", None)
+        if seg is None:
+            continue
+
+        try:
+            mask = mask_utils.decode(seg)
+        except Exception:
+            continue
+
+        if mask.ndim == 3:
+            mask = mask[..., 0]
+
+        mask = (mask > 0).astype(np.float32)
+        if mask.sum() == 0:
+            continue
+
+        cat_id = ann.get("category_id", None)
+        rgb = catid2rgb.get(cat_id, np.array([1.0, 1.0, 1.0]))
+
+        overlay = np.zeros((*mask.shape, 3), dtype=np.float32)
+        overlay[..., 0] = rgb[0]
+        overlay[..., 1] = rgb[1]
+        overlay[..., 2] = rgb[2]
+
+        ax.imshow(overlay, alpha=alpha * mask)
+
+    ax.set_axis_off()
+    plt.tight_layout()
+
+    if output_path is not None:
+        plt.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        plt.show()
+
 
 if __name__ == "__main__":
     
@@ -379,7 +447,7 @@ if __name__ == "__main__":
     sam2_seg50_dict = load_json(path=sam2_seg50_json_path)
         
     #Pseudo labels + Original path from SAM3
-    sam3_seg50_dir = path_join(annots_dir, "SAM3_Seg50")
+    sam3_seg50_dir = path_join(annots_dir, "SAM3_Seg201")
     sam3_seg50_json_path = path_join(sam3_seg50_dir, "train_annotation_coco.json")    
     sam3_seg50_dict = load_json(path=sam3_seg50_json_path)
         
@@ -387,6 +455,8 @@ if __name__ == "__main__":
     output_dir = path_join(this_dir, "visualizations")
     create_dir_if_not_exists(dir_path=output_dir)
     
+    file2imgid = build_file_to_imgid(coco=sam3_seg50_dict)
+    imgid2annos = build_imgid_to_anns(coco=sam3_seg50_dict)
     
     colormap =  [
         {
@@ -451,15 +521,30 @@ if __name__ == "__main__":
         }
     ]
 
-    plot_pseudo_labels_multimodel(
-    frames_dir=frames_dir,
-    og_coco_dict=seg50_dict,
-    pseudo_coco_dicts=[sam2_seg50_dict, sam3_seg50_dict],
-    model_names=["SAM2", "SAM3"],
-    colormap=colormap,
-    output_dir=output_dir,
-    window=1
-    )
+    with tqdm(total=len(list(file2imgid.keys())), desc="Plotting labels", unit="frame") as pbar:            
+        for file_name in list(file2imgid.keys()):
+                
+            img_id = file2imgid[file_name]
+            annos = imgid2annos[img_id]
+            final_file_name = file_name.replace("/", "_")
+        
+            
+            plot_image_with_segmentation(
+                image_path=path_join(frames_dir, file_name),
+                annos=annos,
+                colormap=colormap,
+                output_path=path_join(output_dir, final_file_name)
+            )
+            pbar.update(1)
+    # plot_pseudo_labels_multimodel(
+    # frames_dir=frames_dir,
+    # og_coco_dict=seg50_dict,
+    # pseudo_coco_dicts=[sam2_seg50_dict, sam3_seg50_dict],
+    # model_names=["SAM2", "SAM3"],
+    # colormap=colormap,
+    # output_dir=output_dir,
+    # window=1
+    # )
     
     # plot_pseudo_labels(
     #     frames_dir=frames_dir, 
