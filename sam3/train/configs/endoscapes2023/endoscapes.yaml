@@ -6,14 +6,13 @@ defaults:
 # Paths Configuration (Chage this to your own paths)
 # ============================================================================
 paths:
-  roboflow_vl_100_root: <YOUR_DATASET_DIR>
-  experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
-  bpe_path: <BPE_PATH> # This should be under sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  endoscapes_root: /home/scanar/endovis/models/sam3/sam3/data/Endoscapes2023_Cutmargins
+  experiment_log_dir: /home/scanar/endovis/models/sam3/sam3/outputs/Endoscapes2023_Cutmargins
+  bpe_path: /home/scanar/endovis/models/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
 
-# Roboflow dataset configuration
-roboflow_train:
+# Endoscapes dataset configuration
+endoscapes_train:
   num_images: null # Note: This is the number of images used for training. If null, all images are used.
-  supercategory: ${all_roboflow_supercategories.${string:${submitit.job_array.task_index}}}
 
   # Training transforms pipeline
   train_transforms:
@@ -71,7 +70,7 @@ roboflow_train:
           mean: ${scratch.train_norm_mean}
           std: ${scratch.train_norm_std}
 
-  # loss config (no mask loss)
+  # # loss config (no mask loss)
   loss:
     _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
     matcher: ${scratch.matcher}
@@ -140,7 +139,7 @@ roboflow_train:
   #         loss_dice: 10.0
   #       compute_aux: false
   #   loss_fn_semantic_seg:
-  #     _target_: sam3.losses.loss_fns.SemanticSegCriterion
+  #     _target_: sam3.train.loss.loss_fns.SemanticSegCriterion
   #     presence_head: True
   #     presence_loss: False  # Change
   #     focal: True
@@ -224,7 +223,7 @@ scratch:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
     repeats: ${scratch.hybrid_repeats}
-    dict_key: roboflow100
+    dict_key: endoscapes
     with_seg_masks: ${scratch.enable_segmentation} # Note: Set this to true if using segmentation masks!
 
   gradient_accumulation_steps: 1
@@ -259,7 +258,7 @@ trainer:
     gradient_as_bucket_view: True
 
   loss:
-    all: ${roboflow_train.loss}
+    all: ${endoscapes_train.loss}
     default:
       _target_: sam3.train.loss.sam3_loss.DummyLoss
 
@@ -268,8 +267,8 @@ trainer:
       _target_: sam3.train.data.torch_dataset.TorchDataset
       dataset:
         _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
-        limit_ids: ${roboflow_train.num_images}
-        transforms: ${roboflow_train.train_transforms}
+        limit_ids: ${endoscapes_train.num_images}
+        transforms: ${endoscapes_train.train_transforms}
         load_segmentation: ${scratch.enable_segmentation}
         max_ann_per_img: 500000
         multiplier: 1
@@ -277,8 +276,8 @@ trainer:
         max_val_queries: 50000
         training: true
         use_caching: False
-        img_folder: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/train/
-        ann_file: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/train/_annotations.coco.json
+        img_folder: ${paths.endoscapes_root}/train/images
+        ann_file: ${paths.endoscapes_root}/train/train_annotation_coco.json
 
       shuffle: True
       batch_size: ${scratch.train_batch_size}
@@ -297,9 +296,9 @@ trainer:
           include_negatives: true
           category_chunk_size: 2 # Note: You can increase this based on the memory of your GPU.
           _partial_: true
-        img_folder: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/test/
-        ann_file: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/test/_annotations.coco.json
-        transforms: ${roboflow_train.val_transforms}
+        img_folder: ${paths.endoscapes_root}/val/images
+        ann_file: ${paths.endoscapes_root}/val/val_annotation_coco.json
+        transforms: ${endoscapes_train.val_transforms}
         max_ann_per_img: 100000
         multiplier: 1
         training: false
@@ -321,18 +320,18 @@ trainer:
 
   meters:
     val:
-      roboflow100:
+      endoscapes:
         detection:
           _target_: sam3.eval.coco_writer.PredictionDumper
           iou_type: "bbox"
-          dump_dir: ${launcher.experiment_log_dir}/dumps/roboflow/${roboflow_train.supercategory}
+          dump_dir: ${launcher.experiment_log_dir}/dumps/endoscapes2023/
           merge_predictions: True
           postprocessor: ${scratch.original_box_postprocessor}
           gather_pred_via_filesys: ${scratch.gather_pred_via_filesys}
           maxdets: 100
           pred_file_evaluators:
             - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
-              gt_path: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/test/_annotations.coco.json
+              gt_path: ${paths.endoscapes_root}/val/val_annotation_coco.json
               tide: False
               iou_type: "bbox"
 
@@ -405,7 +404,7 @@ trainer:
       flush_secs: 120
       should_log: True
     wandb_writer: null
-    log_dir: ${launcher.experiment_log_dir}/logs/${roboflow_train.supercategory}
+    log_dir: ${launcher.experiment_log_dir}/logs/
     log_freq: 10
 
 # ============================================================================
@@ -432,108 +431,3 @@ submitit:
     num_tasks: 100
     task_index: 0
 
-# ============================================================================
-# Available Roboflow Supercategories (for reference)
-# ============================================================================
-
-all_roboflow_supercategories:
-  - -grccs
-  - zebrasatasturias
-  - cod-mw-warzone
-  - canalstenosis
-  - label-printing-defect-version-2
-  - new-defects-in-wood
-  - orionproducts
-  - aquarium-combined
-  - varroa-mites-detection--test-set
-  - clashroyalechardetector
-  - stomata-cells
-  - halo-infinite-angel-videogame
-  - pig-detection
-  - urine-analysis1
-  - aerial-sheep
-  - orgharvest
-  - actions
-  - mahjong
-  - liver-disease
-  - needle-base-tip-min-max
-  - wheel-defect-detection
-  - aircraft-turnaround-dataset
-  - xray
-  - wildfire-smoke
-  - spinefrxnormalvindr
-  - ufba-425
-  - speech-bubbles-detection
-  - train
-  - pill
-  - truck-movement
-  - car-logo-detection
-  - inbreast
-  - sea-cucumbers-new-tiles
-  - uavdet-small
-  - penguin-finder-seg
-  - aerial-airport
-  - bibdetection
-  - taco-trash-annotations-in-context
-  - bees
-  - recode-waste
-  - screwdetectclassification
-  - wine-labels
-  - aerial-cows
-  - into-the-vale
-  - gwhd2021
-  - lacrosse-object-detection
-  - defect-detection
-  - dataconvert
-  - x-ray-id
-  - ball
-  - tube
-  - 2024-frc
-  - crystal-clean-brain-tumors-mri-dataset
-  - grapes-5
-  - human-detection-in-floods
-  - buoy-onboarding
-  - apoce-aerial-photographs-for-object-detection-of-construction-equipment
-  - l10ul502
-  - floating-waste
-  - deeppcb
-  - ism-band-packet-detection
-  - weeds4
-  - invoice-processing
-  - thermal-cheetah
-  - tomatoes-2
-  - marine-sharks
-  - peixos-fish
-  - sssod
-  - aerial-pool
-  - countingpills
-  - asphaltdistressdetection
-  - roboflow-trained-dataset
-  - everdaynew
-  - underwater-objects
-  - soda-bottles
-  - dentalai
-  - jellyfish
-  - deepfruits
-  - activity-diagrams
-  - circuit-voltages
-  - all-elements
-  - macro-segmentation
-  - exploratorium-daphnia
-  - signatures
-  - conveyor-t-shirts
-  - fruitjes
-  - grass-weeds
-  - infraredimageofpowerequipment
-  - 13-lkc01
-  - wb-prova
-  - flir-camera-objects
-  - paper-parts
-  - football-player-detection
-  - trail-camera
-  - smd-components
-  - water-meter
-  - nih-xray
-  - the-dreidel-project
-  - electric-pylon-detection-in-rsi
-  - cable-damage

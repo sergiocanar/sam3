@@ -637,6 +637,7 @@ class Masks(LossWithWeights):
         """Compute the losses related to the masks: the focal loss and the dice loss.
         targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
+            
         assert "pred_masks" in outputs
         assert "is_valid_mask" in targets
         # Optionally, not applying Masks loss to detection queries in video.
