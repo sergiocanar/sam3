@@ -157,3 +157,5 @@ data/
 agent_output/
 *.png
 *.jpg
+sam3/outputs
+sam3/data
