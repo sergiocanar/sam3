@@ -55,6 +55,13 @@ def cvs_argparse():
     )
     
     parser.add_argument(
+        "--window",
+        type=int,
+        default=1,
+        help="Number of frames to propagate masks into past and future (default: 1)"
+    )
+    
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="SAM3_Seg50",
@@ -252,7 +259,7 @@ def get_video_segments_for_segmentation(video_path: str, mask_info_lt: list, pre
         with tqdm(total=len(kf_idx_lt), desc='Processing keyframes...') as pbar:            
             for ann_frame_idx in kf_idx_lt:        
                 logging.info(f'Working on keyframe: {ann_frame_idx}')
-                
+                                
                 for out_frame_idx, out_obj_ids, low_res_masks, out_mask_logits, obj_scores in predictor.propagate_in_video(inference_state=inference_state, start_frame_idx=ann_frame_idx, max_frame_num_to_track=window, reverse=False):
                     video_segments[out_frame_idx] = {out_obj_id: out_mask_logits[i] for i, out_obj_id in enumerate(out_obj_ids)}
                 
@@ -462,13 +469,6 @@ def bbox2segm(video_path: str, coco_dict:dict, predictor: Sam3VideoPredictorMult
     return updated_dict, latest_ann_id    
 
             
-                
-            
-            
-        
-        
-            
-
 if __name__ == "__main__":
     
     #Parser
@@ -559,6 +559,7 @@ if __name__ == "__main__":
     else:
         final_dict = {"images": gt_coco_dict["images"], "annotations": [], "categories": gt_coco_dict["categories"]}
 
+    # train_vids_lt = [train_vids_lt[0]]
     
     with tqdm(total=len(train_vids_lt), desc="Processing videos...", unit="video") as pbar:
         for video_id in train_vids_lt:
@@ -569,6 +570,7 @@ if __name__ == "__main__":
                     video_path=video_path,
                     mask_info_lt=object_info_lt,
                     predictor=predictor,
+                    window=args.window
                 )
                             
                 new_final_dict, new_img_id_counter, new_latest_ann_id = update_coco_json(
