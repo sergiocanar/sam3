@@ -1079,6 +1079,7 @@ def build_sam3_multiplex_video_predictor(
     session_expiration_sec: int = 1200,
     default_output_prob_thresh: float = 0.5,
     async_loading_frames: bool = True,
+    batched_grounding_batch_size: int = 16,
 ):
     """
     Build a fully-initialized Sam3MultiplexVideoPredictor.
@@ -1100,6 +1101,10 @@ def build_sam3_multiplex_video_predictor(
         session_expiration_sec: Session expiration timeout in seconds
         default_output_prob_thresh: Default probability threshold for output masks
         async_loading_frames: Whether to load frames asynchronously
+        batched_grounding_batch_size: Number of frames grounded together per detector
+            forward pass. Lower this on GPUs without FlashAttention (pre-Ampere), since
+            the attention op's memory scales with this batch size at the detector's
+            native 1008x1008 resolution.
 
     Returns:
         Sam3MultiplexVideoPredictor: The fully-initialized predictor
@@ -1187,7 +1192,7 @@ def build_sam3_multiplex_video_predictor(
         max_num_objects=max_num_objects,
         postprocess_batch_size=16,
         use_batched_grounding=True,
-        batched_grounding_batch_size=16,
+        batched_grounding_batch_size=batched_grounding_batch_size,
         max_num_kboxes=0,
         sprinkle_removal_area=0,
         is_multiplex=True,

@@ -2214,11 +2214,16 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         self,
         resource_path,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
         async_loading_frames=False,
         use_torchcodec=False,
         use_cv2=False,
         input_is_mp4=False,
     ):
+        # offload_state_to_cpu is accepted for API parity with Sam3BasePredictor.start_session
+        # (which always forwards it), but the multiplex tracking path doesn't implement
+        # CPU-offloaded inference state, so it's a no-op here.
+        del offload_state_to_cpu
         inference_state = super().init_state(
             resource_path=resource_path,
             offload_video_to_cpu=offload_video_to_cpu,

@@ -499,6 +499,44 @@ def save_masklet_video(video_frames, outputs, out_path, alpha=0.5, fps=10):
     os.remove("temp.mp4")  # Clean up temporary file
 
 
+def save_masklet_video_side_by_side(video_frames, outputs, out_path, alpha=0.5, fps=10):
+    """
+    Like save_masklet_video, but each output frame is the raw image and the
+    mask overlay placed side by side (raw on the left, overlay on the right).
+    """
+    first_img = load_frame(video_frames[0])
+    if first_img.dtype == np.float32 or first_img.max() <= 1.0:
+        first_img = (first_img * 255).astype(np.uint8)
+    height, width = first_img.shape[:2]
+    tmp_path = f"{out_path}.tmp.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(tmp_path, fourcc, fps, (width * 2, height))
+
+    outputs_list = [
+        (video_frames[frame_idx], frame_idx, outputs[frame_idx])
+        for frame_idx in sorted(outputs.keys())
+    ]
+
+    for frame, frame_idx, frame_outputs in tqdm(outputs_list):
+        img = load_frame(frame)
+        if img.dtype == np.float32 or img.max() <= 1.0:
+            img = (img * 255).astype(np.uint8)
+        img = img[..., :3]
+        overlay = render_masklet_frame(
+            img, frame_outputs, frame_idx=frame_idx, alpha=alpha
+        )
+        side_by_side = np.concatenate([img, overlay], axis=1)
+        writer.write(cv2.cvtColor(side_by_side, cv2.COLOR_RGB2BGR))
+
+    writer.release()
+
+    # Re-encode the video for VSCode compatibility using ffmpeg
+    subprocess.run(["ffmpeg", "-y", "-i", tmp_path, out_path])
+    print(f"Re-encoded video saved to {out_path}")
+
+    os.remove(tmp_path)  # Clean up temporary file
+
+
 def save_masklet_image(frame, outputs, out_path, alpha=0.5, frame_idx=None):
     """
     Save a single image with masklet overlays.
